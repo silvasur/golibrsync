@@ -32,9 +32,8 @@ var (
 	ErrInternal   = errors.New("Internal error (library bug?)")
 )
 
-// SignatureGen holds information to generate a librsync file signature.
-// It must be constructed with the NewSignatureGen or NewDefaultSignatureGen functions.
-type SignatureGen struct {
+// Job holds information about a running librsync operation. The output can be accessed with the Read method.
+type Job struct {
 	rsbufs *C.rs_buffers_t
 	job    *C.rs_job_t
 
@@ -46,48 +45,65 @@ type SignatureGen struct {
 
 	outbufTotal []byte
 	outbuf      []byte
-
-	blocklen, stronglen uint
 }
 
-// NewDefaultSignatureGen is like NewSignatureGen, but uses default values for blocklen and stronglen.
-func NewDefaultSignatureGen(input io.Reader) (siggen *SignatureGen, err error) {
-	siggen, err = NewSignatureGen(C.RS_DEFAULT_BLOCK_LEN, C.RS_DEFAULT_STRONG_LEN, input)
+func newJob(input io.Reader) (job *Job, err error) {
+	job = new(Job)
+
+	job.in = input
+	job.inbuf = make([]byte, inbufSize)
+	job.outbufTotal = make([]byte, outbufSize)
+
+	job.rsbufs = C.new_rs_buffers()
+	if job.rsbufs == nil {
+		return nil, errors.New("Could not allocate memory for rs_buffers_t object")
+	}
+
+	job.rsbufs.eof_in = 0
+	job.rsbufs.avail_in = 0
+
+	job.running = true
+
 	return
 }
 
-// NewSignatureGen creates a new SignatureGen instance.
+// NewDefaultSignatureGen is like NewSignatureGen, but uses default values for blocklen and stronglen.
+func NewDefaultSignatureGen(input io.Reader) (job *Job, err error) {
+	job, err = NewSignatureGen(C.RS_DEFAULT_BLOCK_LEN, C.RS_DEFAULT_STRONG_LEN, input)
+	return
+}
+
+// NewSignatureGen creates a signature generation job.
 // 
 // blocklen is the length of a block.
 // stronglen is the length of the stong hash.
 // input is an io.Reader that provides the input data.
-func NewSignatureGen(blocklen, stronglen uint, input io.Reader) (siggen *SignatureGen, err error) {
-	siggen = new(SignatureGen)
-
-	siggen.blocklen, siggen.stronglen = blocklen, stronglen
-	siggen.in = input
-	siggen.inbuf = make([]byte, inbufSize)
-	siggen.outbufTotal = make([]byte, outbufSize)
-
-	siggen.rsbufs = C.new_rs_buffers()
-	if siggen.rsbufs == nil {
-		return nil, fmt.Errorf("Could not allocate memory for rs_buffers_t object")
+func NewSignatureGen(blocklen, stronglen uint, input io.Reader) (job *Job, err error) {
+	job, err = newJob(input)
+	if err != nil {
+		return
 	}
 
-	siggen.job = C.rs_sig_begin(C.size_t(blocklen), C.size_t(stronglen))
-	if siggen.job == nil {
-		siggen.Close()
-		return nil, fmt.Errorf("rs_sig_begin failed")
+	job.job = C.rs_sig_begin(C.size_t(blocklen), C.size_t(stronglen))
+	if job.job == nil {
+		job.Close()
+		return nil, errors.New("rs_sig_begin failed")
 	}
 
-	siggen.running = true
 	return
 }
 
 // Close will free memory that Go's garbage collector would not be able to free.
-func (siggen *SignatureGen) Close() error {
-	C.free(unsafe.Pointer(siggen.rsbufs))
-	C.rs_job_free(siggen.job)
+func (job *Job) Close() error {
+	if job.rsbufs != nil {
+		C.free(unsafe.Pointer(job.rsbufs))
+		job.rsbufs = nil
+	}
+
+	if job.job != nil {
+		C.rs_job_free(job.job)
+		job.job = nil
+	}
 
 	return nil
 }
@@ -111,60 +127,119 @@ func jobIter(job *C.rs_job_t, rsbufs *C.rs_buffers_t) (running bool, err error) 
 	return
 }
 
-// Read reads len(p) or less bytes of the generated signature.
-func (siggen *SignatureGen) Read(p []byte) (readN int, outerr error) {
-	if len(siggen.outbuf) > 0 {
-		if len(siggen.outbuf) > len(p) {
+// Read reads len(p) or less bytes of the generated output.
+func (job *Job) Read(p []byte) (readN int, outerr error) {
+	if len(job.outbuf) > 0 {
+		if len(job.outbuf) > len(p) {
 			readN = len(p)
 		} else {
-			readN = len(siggen.outbuf)
+			readN = len(job.outbuf)
 		}
 
-		copy(p[:readN], siggen.outbuf[:readN])
+		copy(p[:readN], job.outbuf[:readN])
 		p = p[:readN]
-		siggen.outbuf = siggen.outbuf[readN:]
+		job.outbuf = job.outbuf[readN:]
 		return
 	}
 
-	if !siggen.running {
-		if siggen.err != nil {
-			return 0, siggen.err
+	if !job.running {
+		if job.err != nil {
+			return 0, job.err
 		}
 
 		return 0, io.EOF
 	}
 
 	// Fill input buffer
-	if (siggen.rsbufs.avail_in == 0) && (siggen.rsbufs.eof_in == 0) {
-		n, err := siggen.in.Read(siggen.inbuf[0:inbufSize])
+	if (job.rsbufs.avail_in == 0) && (job.rsbufs.eof_in == 0) {
+		n, err := job.in.Read(job.inbuf[0:inbufSize])
 
 		switch err {
 		case nil:
 		case io.EOF:
-			siggen.rsbufs.eof_in = 1
+			job.rsbufs.eof_in = 1
 		default:
 			outerr = err
-			siggen.err = err
-			siggen.running = false
+			job.err = err
+			job.running = false
 			return
 		}
 
-		siggen.rsbufs.next_in = (*C.char)(unsafe.Pointer(&(siggen.inbuf[0])))
-		siggen.rsbufs.avail_in = C.size_t(n)
+		job.rsbufs.next_in = (*C.char)(unsafe.Pointer(&(job.inbuf[0])))
+		job.rsbufs.avail_in = C.size_t(n)
 	}
 
-	siggen.outbuf = siggen.outbufTotal
-	siggen.rsbufs.next_out = (*C.char)(unsafe.Pointer(&(siggen.outbuf[0])))
-	siggen.rsbufs.avail_out = C.size_t(len(siggen.outbuf))
+	job.outbuf = job.outbufTotal
+	job.rsbufs.next_out = (*C.char)(unsafe.Pointer(&(job.outbuf[0])))
+	job.rsbufs.avail_out = C.size_t(len(job.outbuf))
 
 	var err error
-	siggen.running, err = jobIter(siggen.job, siggen.rsbufs)
+	job.running, err = jobIter(job.job, job.rsbufs)
 
-	outN := int(uintptr(unsafe.Pointer(siggen.rsbufs.next_out)) - uintptr(unsafe.Pointer(&(siggen.outbuf[0]))))
-	siggen.outbuf = siggen.outbuf[:outN]
+	outN := int(uintptr(unsafe.Pointer(job.rsbufs.next_out)) - uintptr(unsafe.Pointer(&(job.outbuf[0]))))
+	job.outbuf = job.outbuf[:outN]
 
 	if err != nil {
 		return outN, err
 	}
+	return
+}
+
+// Signature is an in-memory representation of a signature.
+type Signature struct {
+	sig *C.rs_signature_t
+}
+
+// Close will free memory that Go's garbage collector would not be able to free.
+func (s Signature) Close() error {
+	if s.sig != nil {
+		C.rs_free_sumset(s.sig)
+		s.sig = nil
+	}
+	return nil
+}
+
+// LoadSignature loads a signature to memory.
+func LoadSignature(input io.Reader) (sig Signature, err error) {
+	job, err := newJob(input)
+	if err != nil {
+		return
+	}
+	defer job.Close()
+
+	job.job = C.rs_loadsig_begin(&(sig.sig))
+	if job.job == nil {
+		err = errors.New("rs_loadsig_begin failed")
+		return
+	}
+
+	if _, err = io.Copy(&nirvana{}, job); err != nil {
+		return
+	}
+
+	rsret := C.rs_build_hash_table(sig.sig)
+	if rsret != C.RS_DONE {
+		err = fmt.Errorf("rs_build_hash_table returned %d", rsret)
+	}
+
+	return
+}
+
+// NewDeltaGen creates a delta generation job.
+// 
+// sig is the signature loaded by LoadSignature.
+// input is a reades that provides the new, modified data.
+func NewDeltaGen(sig Signature, input io.Reader) (job *Job, err error) {
+	job, err = newJob(input)
+	if err != nil {
+		return
+	}
+
+	job.job = C.rs_delta_begin(sig.sig)
+	if job.job == nil {
+		job.Close()
+		return nil, errors.New("rs_delta_begin failed")
+	}
+
 	return
 }
