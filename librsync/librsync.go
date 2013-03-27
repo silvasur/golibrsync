@@ -68,8 +68,8 @@ func newJob(input io.Reader) (job *Job, err error) {
 }
 
 // NewDefaultSignatureGen is like NewSignatureGen, but uses default values for blocklen and stronglen.
-func NewDefaultSignatureGen(input io.Reader) (job *Job, err error) {
-	job, err = NewSignatureGen(C.RS_DEFAULT_BLOCK_LEN, C.RS_DEFAULT_STRONG_LEN, input)
+func NewDefaultSignatureGen(basis io.Reader) (job *Job, err error) {
+	job, err = NewSignatureGen(C.RS_DEFAULT_BLOCK_LEN, C.RS_DEFAULT_STRONG_LEN, basis)
 	return
 }
 
@@ -77,9 +77,9 @@ func NewDefaultSignatureGen(input io.Reader) (job *Job, err error) {
 // 
 // blocklen is the length of a block.
 // stronglen is the length of the stong hash.
-// input is an io.Reader that provides the input data.
-func NewSignatureGen(blocklen, stronglen uint, input io.Reader) (job *Job, err error) {
-	job, err = newJob(input)
+// basis is an io.Reader that provides data of the basis file.
+func NewSignatureGen(blocklen, stronglen uint, basis io.Reader) (job *Job, err error) {
+	job, err = newJob(basis)
 	if err != nil {
 		return
 	}
@@ -246,9 +246,9 @@ func LoadSignature(input io.Reader) (sig Signature, err error) {
 // NewDeltaGen creates a delta generation job.
 // 
 // sig is the signature loaded by LoadSignature.
-// input is a reades that provides the new, modified data.
-func NewDeltaGen(sig Signature, input io.Reader) (job *Job, err error) {
-	job, err = newJob(input)
+// newfile is a reades that provides the new, modified data.
+func NewDeltaGen(sig Signature, newfile io.Reader) (job *Job, err error) {
+	job, err = newJob(newfile)
 	if err != nil {
 		return
 	}
@@ -267,15 +267,15 @@ func NewDeltaGen(sig Signature, input io.Reader) (job *Job, err error) {
 // IMPORTANT: You still need to Close() this!
 type Patcher struct {
 	*Job
-	base io.ReaderAt
-	buf  []byte
+	basis io.ReaderAt
+	buf   []byte
 }
 
 func _patch_callback(_patcher unsafe.Pointer, pos C.rs_long_t, len *C.size_t, _buf *unsafe.Pointer) C.rs_result {
 	patcher := (*Patcher)(_patcher)
 
 	patcher.buf = make([]byte, int(*len))
-	n, err := patcher.base.ReadAt(patcher.buf, int64(pos))
+	n, err := patcher.basis.ReadAt(patcher.buf, int64(pos))
 	if n < int(*len) {
 		if err != io.EOF {
 			panic(jobInternalPanic{err})
@@ -291,7 +291,11 @@ func _patch_callback(_patcher unsafe.Pointer, pos C.rs_long_t, len *C.size_t, _b
 
 var patch_callback = _patch_callback // So we can use the `&` operator in NewPatcher
 
-func NewPatcher(delta io.Reader, base io.ReaderAt) (job *Patcher, err error) {
+// NewPatcher creates a Patcher (which basically is a Job object with some hidden extra data).
+// 
+// delta is a reader that provides the delta.
+// basis provides the basis file.
+func NewPatcher(delta io.Reader, basis io.ReaderAt) (job *Patcher, err error) {
 	_job, e := newJob(delta)
 	if e != nil {
 		err = e
@@ -299,8 +303,8 @@ func NewPatcher(delta io.Reader, base io.ReaderAt) (job *Patcher, err error) {
 	}
 
 	job = &Patcher{
-		Job:  _job,
-		base: base}
+		Job:   _job,
+		basis: basis}
 
 	job.job = C.rs_patch_begin((*C.rs_copy_cb)(unsafe.Pointer(&patch_callback)), unsafe.Pointer(job))
 	if job.job == nil {
