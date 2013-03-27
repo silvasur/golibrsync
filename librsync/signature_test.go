@@ -76,5 +76,23 @@ func TestSignatureDeltaPatch(t *testing.T) {
 		}
 	}
 
-	// TODO: Test patching
+	// Apply Patch 
+	patchres := new(bytes.Buffer)
+	patcher, err := NewPatcher(deltabuf, orig)
+	if err != nil {
+		t.Fatalf("could not create a patcher: %s", err)
+	}
+	defer patcher.Close()
+
+	if _, err = io.Copy(patchres, patcher); err != nil {
+		t.Fatalf("Applying the patch failed: %s", err)
+	}
+
+	if !bytes.Equal(patchres.Bytes(), testdata.Mutation()) {
+		if path, err := dump(patchres); err == nil {
+			t.Fatalf("patch result and mutation are not equal. Result dumped to %s", path)
+		} else {
+			t.Fatalf("patch result and mutation are not equal. Could not dump result: %s", err)
+		}
+	}
 }

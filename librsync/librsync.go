@@ -108,7 +108,25 @@ func (job *Job) Close() error {
 	return nil
 }
 
+// For errors in callbacks
+type jobInternalPanic struct {
+	err error
+}
+
+func (jp jobInternalPanic) Error() string { return jp.err.Error() }
+
 func jobIter(job *C.rs_job_t, rsbufs *C.rs_buffers_t) (running bool, err error) {
+	defer func() {
+		r := recover()
+		jp, ok := r.(jobInternalPanic)
+		if !ok {
+			panic(r)
+		}
+
+		running = false
+		err = jp.err
+	}()
+
 	switch res := C.rs_job_iter(job, rsbufs); res {
 	case C.RS_DONE:
 	case C.RS_BLOCKED:
@@ -239,6 +257,55 @@ func NewDeltaGen(sig Signature, input io.Reader) (job *Job, err error) {
 	if job.job == nil {
 		job.Close()
 		return nil, errors.New("rs_delta_begin failed")
+	}
+
+	return
+}
+
+// Patcher is a job with additional hidden data for patching.
+// 
+// IMPORTANT: You still need to Close() this!
+type Patcher struct {
+	*Job
+	base io.ReaderAt
+	buf  []byte
+}
+
+func _patch_callback(_patcher unsafe.Pointer, pos C.rs_long_t, len *C.size_t, _buf *unsafe.Pointer) C.rs_result {
+	patcher := (*Patcher)(_patcher)
+
+	patcher.buf = make([]byte, int(*len))
+	n, err := patcher.base.ReadAt(patcher.buf, int64(pos))
+	if n < int(*len) {
+		if err != io.EOF {
+			panic(jobInternalPanic{err})
+		} else {
+			return C.RS_INPUT_ENDED
+		}
+	}
+	*len = C.size_t(n)
+	*_buf = unsafe.Pointer(&(patcher.buf[0]))
+
+	return C.RS_DONE
+}
+
+var patch_callback = _patch_callback // So we can use the `&` operator in NewPatcher
+
+func NewPatcher(delta io.Reader, base io.ReaderAt) (job *Patcher, err error) {
+	_job, e := newJob(delta)
+	if e != nil {
+		err = e
+		return
+	}
+
+	job = &Patcher{
+		Job:  _job,
+		base: base}
+
+	job.job = C.rs_patch_begin((*C.rs_copy_cb)(unsafe.Pointer(&patch_callback)), unsafe.Pointer(job))
+	if job.job == nil {
+		job.Close()
+		return nil, errors.New("rs_patch_begin failed")
 	}
 
 	return
