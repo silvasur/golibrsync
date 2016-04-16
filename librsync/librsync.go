@@ -7,9 +7,14 @@ package librsync
 #include <librsync.h>
 #include <stdlib.h>
 
-rs_buffers_t* new_rs_buffers() {
+static inline rs_buffers_t* new_rs_buffers() {
 	return (rs_buffers_t*) malloc(sizeof(rs_buffers_t));
 }
+
+rs_result patchCallback(void* _patcher, rs_long_t pos, size_t* len, void** _buf) {
+	return patchCallbackGo(_patcher, pos, len, _buf);
+}
+
 */
 import "C"
 
@@ -118,6 +123,10 @@ func (jp jobInternalPanic) Error() string { return jp.err.Error() }
 func jobIter(job *C.rs_job_t, rsbufs *C.rs_buffers_t) (running bool, err error) {
 	defer func() {
 		r := recover()
+		if r == nil {
+			// there was no panic
+			return
+		}
 		jp, ok := r.(jobInternalPanic)
 		if !ok {
 			panic(r)
@@ -271,25 +280,7 @@ type Patcher struct {
 	buf   []byte
 }
 
-func _patch_callback(_patcher unsafe.Pointer, pos C.rs_long_t, len *C.size_t, _buf *unsafe.Pointer) C.rs_result {
-	patcher := (*Patcher)(_patcher)
-
-	patcher.buf = make([]byte, int(*len))
-	n, err := patcher.basis.ReadAt(patcher.buf, int64(pos))
-	if n < int(*len) {
-		if err != io.EOF {
-			panic(jobInternalPanic{err})
-		} else {
-			return C.RS_INPUT_ENDED
-		}
-	}
-	*len = C.size_t(n)
-	*_buf = unsafe.Pointer(&(patcher.buf[0]))
-
-	return C.RS_DONE
-}
-
-var patch_callback = _patch_callback // So we can use the `&` operator in NewPatcher
+var patchCallback = C.patchCallback // So we can use the `&` operator in NewPatcher
 
 // NewPatcher creates a Patcher (which basically is a Job object with some hidden extra data).
 // 
@@ -306,7 +297,7 @@ func NewPatcher(delta io.Reader, basis io.ReaderAt) (job *Patcher, err error) {
 		Job:   _job,
 		basis: basis}
 
-	job.job = C.rs_patch_begin((*C.rs_copy_cb)(unsafe.Pointer(&patch_callback)), unsafe.Pointer(job))
+	job.job = C.rs_patch_begin((*C.rs_copy_cb)(patchCallback), unsafe.Pointer(job))
 	if job.job == nil {
 		job.Close()
 		return nil, errors.New("rs_patch_begin failed")
