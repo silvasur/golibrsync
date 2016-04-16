@@ -79,7 +79,7 @@ func NewDefaultSignatureGen(basis io.Reader) (job *Job, err error) {
 }
 
 // NewSignatureGen creates a signature generation job.
-// 
+//
 // blocklen is the length of a block.
 // stronglen is the length of the stong hash.
 // basis is an io.Reader that provides data of the basis file.
@@ -253,7 +253,7 @@ func LoadSignature(input io.Reader) (sig Signature, err error) {
 }
 
 // NewDeltaGen creates a delta generation job.
-// 
+//
 // sig is the signature loaded by LoadSignature.
 // newfile is a reades that provides the new, modified data.
 func NewDeltaGen(sig Signature, newfile io.Reader) (job *Job, err error) {
@@ -272,7 +272,7 @@ func NewDeltaGen(sig Signature, newfile io.Reader) (job *Job, err error) {
 }
 
 // Patcher is a job with additional hidden data for patching.
-// 
+//
 // IMPORTANT: You still need to Close() this!
 type Patcher struct {
 	*Job
@@ -283,7 +283,7 @@ type Patcher struct {
 var patchCallback = C.patchCallback // So we can use the `&` operator in NewPatcher
 
 // NewPatcher creates a Patcher (which basically is a Job object with some hidden extra data).
-// 
+//
 // delta is a reader that provides the delta.
 // basis provides the basis file.
 func NewPatcher(delta io.Reader, basis io.ReaderAt) (job *Patcher, err error) {
