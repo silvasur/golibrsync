@@ -6,13 +6,37 @@ package librsync
 #include <stdio.h>
 #include <librsync.h>
 #include <stdlib.h>
+#include <stdbool.h>
 
 static inline rs_buffers_t* new_rs_buffers() {
 	return (rs_buffers_t*) malloc(sizeof(rs_buffers_t));
 }
 
+rs_result patchCallbackGo(void *_patcher, rs_long_t pos, size_t *len, void *_buf);
+
 rs_result patchCallback(void* _patcher, rs_long_t pos, size_t* len, void** _buf) {
 	return patchCallbackGo(_patcher, pos, len, _buf);
+}
+
+#ifndef RS_DEFAULT_STRONG_LEN
+// librsync >= 1.0.0, 0 is the full size (32 bytes)
+#define DEFAULT_STRONG_LEN 0
+#else
+// librsync < 1.0.0, using md4 (8 bytes)
+#define DEFAULT_STRONG_LEN RS_DEFAULT_STRONG_LEN
+#endif
+
+static inline rs_job_t* sig_begin(size_t new_block_len, size_t strong_sum_len, bool compat) {
+#ifndef RS_DEFAULT_STRONG_LEN
+	// librsync >= 1.0.0, supporting the newer hash function (blake2b)
+	if (compat) {
+		return rs_sig_begin(new_block_len, strong_sum_len, RS_MD4_SIG_MAGIC);
+	}
+	return rs_sig_begin(new_block_len, strong_sum_len, RS_BLAKE2_SIG_MAGIC);
+#else
+	// not supporting the newer hash function, fall back to the md4 hash
+	return rs_sig_begin(new_block_len, strong_sum_len);
+#endif
 }
 
 */
@@ -28,6 +52,11 @@ import (
 const (
 	inbufSize  = 16 * 1024
 	outbufSize = 16 * 1024
+)
+
+const (
+	DefaultBlockLen  = C.RS_DEFAULT_BLOCK_LEN
+	DefaultStrongLen = C.DEFAULT_STRONG_LEN
 )
 
 var (
@@ -72,24 +101,43 @@ func newJob(input io.Reader) (job *Job, err error) {
 	return
 }
 
-// NewDefaultSignatureGen is like NewSignatureGen, but uses default values for blocklen and stronglen.
+// Config sets parameters for NewSignatureGen. May be the zero value for default
+// values.
+type Config struct {
+	BlockLen  uint // length of a block, e.g. 2048
+	StrongLen uint // length of a strong hash, e.g. 32 or 0
+	CompatMD4 bool // enable for compatibility with librsync < 1.0.0
+}
+
+func (c *Config) setup() {
+	if c.BlockLen == 0 {
+		c.BlockLen = DefaultBlockLen
+	}
+	if c.StrongLen == 0 {
+		c.StrongLen = DefaultStrongLen
+	}
+}
+
+// NewDefaultSignatureGen is like NewSignatureGen, but uses the default
+// configuration.
 func NewDefaultSignatureGen(basis io.Reader) (job *Job, err error) {
-	job, err = NewSignatureGen(C.RS_DEFAULT_BLOCK_LEN, C.RS_DEFAULT_STRONG_LEN, basis)
+	job, err = NewSignatureGen(Config{}, basis)
 	return
 }
 
 // NewSignatureGen creates a signature generation job.
 //
-// blocklen is the length of a block.
-// stronglen is the length of the stong hash.
+// config is a Config object for more options.
 // basis is an io.Reader that provides data of the basis file.
-func NewSignatureGen(blocklen, stronglen uint, basis io.Reader) (job *Job, err error) {
+func NewSignatureGen(config Config, basis io.Reader) (job *Job, err error) {
 	job, err = newJob(basis)
 	if err != nil {
 		return
 	}
 
-	job.job = C.rs_sig_begin(C.size_t(blocklen), C.size_t(stronglen))
+	config.setup()
+
+	job.job = C.sig_begin(C.size_t(config.BlockLen), C.size_t(config.StrongLen), C.bool(config.CompatMD4))
 	if job.job == nil {
 		job.Close()
 		return nil, errors.New("rs_sig_begin failed")
@@ -273,7 +321,7 @@ func NewDeltaGen(sig Signature, newfile io.Reader) (job *Job, err error) {
 
 // Patcher is a job with additional hidden data for patching.
 //
-// IMPORTANT: You still need to Close() this!
+// This patcher must be closed after use to free memory.
 type Patcher struct {
 	*Job
 	basis io.ReaderAt
@@ -297,11 +345,21 @@ func NewPatcher(delta io.Reader, basis io.ReaderAt) (job *Patcher, err error) {
 		Job:   _job,
 		basis: basis}
 
-	job.job = C.rs_patch_begin((*C.rs_copy_cb)(patchCallback), unsafe.Pointer(job))
+	id := uintptr(unsafe.Pointer(_job.rsbufs)) // this is a unique, unchanging number (C doesn't change pointers under the hood)
+	storePatcher(job, id)
+	job.job = C.rs_patch_begin((*C.rs_copy_cb)(patchCallback), unsafe.Pointer(id))
 	if job.job == nil {
+		dropPatcher(id)
 		job.Close()
 		return nil, errors.New("rs_patch_begin failed")
 	}
 
 	return
+}
+
+// Close unreferences memory that the garbage collector would not otherwise be
+// able to free.
+func (patch *Patcher) Close() error {
+	dropPatcher(uintptr(unsafe.Pointer(patch.Job.rsbufs)))
+	return patch.Job.Close()
 }

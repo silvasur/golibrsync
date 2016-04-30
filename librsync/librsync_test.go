@@ -22,7 +22,14 @@ func TestSignatureDeltaPatch(t *testing.T) {
 		t.Fatalf("Creating the signature failed: %s", err)
 	}
 
-	if !bytes.Equal(sigbuf.Bytes(), testdata.RandomDataSig()) {
+	matches := false
+	// Check both possible signatures.
+	for _, sigcheck := range testdata.RandomDataSig() {
+		if bytes.Equal(sigbuf.Bytes(), sigcheck) {
+			matches = true
+		}
+	}
+	if !matches {
 		if path, err := dump(sigbuf); err == nil {
 			t.Fatalf("Signatures do not match. Generated signature dumped to %s", path)
 		} else {
