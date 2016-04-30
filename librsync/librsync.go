@@ -11,6 +11,8 @@ static inline rs_buffers_t* new_rs_buffers() {
 	return (rs_buffers_t*) malloc(sizeof(rs_buffers_t));
 }
 
+rs_result patchCallbackGo(void *_patcher, rs_long_t pos, size_t *len, void *_buf);
+
 rs_result patchCallback(void* _patcher, rs_long_t pos, size_t* len, void** _buf) {
 	return patchCallbackGo(_patcher, pos, len, _buf);
 }
