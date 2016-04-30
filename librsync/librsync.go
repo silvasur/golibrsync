@@ -275,7 +275,7 @@ func NewDeltaGen(sig Signature, newfile io.Reader) (job *Job, err error) {
 
 // Patcher is a job with additional hidden data for patching.
 //
-// IMPORTANT: You still need to Close() this!
+// This patcher must be closed after use to free memory.
 type Patcher struct {
 	*Job
 	basis io.ReaderAt
@@ -299,11 +299,21 @@ func NewPatcher(delta io.Reader, basis io.ReaderAt) (job *Patcher, err error) {
 		Job:   _job,
 		basis: basis}
 
-	job.job = C.rs_patch_begin((*C.rs_copy_cb)(patchCallback), unsafe.Pointer(job))
+	id := uintptr(unsafe.Pointer(_job.rsbufs)) // this is a unique, unchanging number (C doesn't change pointers under the hood)
+	storePatcher(job, id)
+	job.job = C.rs_patch_begin((*C.rs_copy_cb)(patchCallback), unsafe.Pointer(id))
 	if job.job == nil {
+		dropPatcher(id)
 		job.Close()
 		return nil, errors.New("rs_patch_begin failed")
 	}
 
 	return
+}
+
+// Close unreferences memory that the garbage collector would not otherwise be
+// able to free.
+func (patch *Patcher) Close() error {
+	dropPatcher(uintptr(unsafe.Pointer(patch.Job.rsbufs)))
+	return patch.Job.Close()
 }
