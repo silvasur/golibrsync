@@ -59,7 +59,7 @@ func TestSignatureDeltaPatch(t *testing.T) {
 		}
 	}
 
-	// Apply Patch 
+	// Apply Patch
 	patchres := new(bytes.Buffer)
 	patcher, err := NewPatcher(deltabuf, orig)
 	if err != nil {
