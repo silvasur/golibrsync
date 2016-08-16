@@ -2,7 +2,7 @@ package librsync
 
 import (
 	"bytes"
-	"github.com/kch42/golibrsync/librsync/testdata"
+	"github.com/silvasur/golibrsync/librsync/testdata"
 	"testing"
 )
 
