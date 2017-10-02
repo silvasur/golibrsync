@@ -74,9 +74,10 @@ type Job struct {
 	running bool
 	err     error
 
-	inbuf []byte
+	inbuf unsafe.Pointer
 	in    io.Reader
 
+	outbufOrig  unsafe.Pointer
 	outbufTotal []byte
 	outbuf      []byte
 }
@@ -85,8 +86,9 @@ func newJob(input io.Reader) (job *Job, err error) {
 	job = new(Job)
 
 	job.in = input
-	job.inbuf = make([]byte, inbufSize)
-	job.outbufTotal = make([]byte, outbufSize)
+	job.inbuf = C.malloc(inbufSize)
+	job.outbufOrig = C.malloc(outbufSize)
+	job.outbufTotal = (*[outbufSize]byte)(job.outbufOrig)[:]
 
 	job.rsbufs = C.new_rs_buffers()
 	if job.rsbufs == nil {
@@ -158,6 +160,9 @@ func (job *Job) Close() error {
 		job.job = nil
 	}
 
+	C.free(job.inbuf)
+	C.free(job.outbufOrig)
+
 	return nil
 }
 
@@ -227,7 +232,9 @@ func (job *Job) Read(p []byte) (readN int, outerr error) {
 
 	// Fill input buffer
 	if (job.rsbufs.avail_in == 0) && (job.rsbufs.eof_in == 0) {
-		n, err := job.in.Read(job.inbuf[0:inbufSize])
+		// Turn job.inbuf (C buffer) into a Go slice
+		// https://github.com/golang/go/wiki/cgo#turning-c-arrays-into-go-slices
+		n, err := job.in.Read((*[inbufSize]byte)(job.inbuf)[:])
 
 		switch err {
 		case nil:
@@ -240,7 +247,7 @@ func (job *Job) Read(p []byte) (readN int, outerr error) {
 			return
 		}
 
-		job.rsbufs.next_in = (*C.char)(unsafe.Pointer(&(job.inbuf[0])))
+		job.rsbufs.next_in = (*C.char)(job.inbuf)
 		job.rsbufs.avail_in = C.size_t(n)
 	}
 
@@ -325,7 +332,7 @@ func NewDeltaGen(sig Signature, newfile io.Reader) (job *Job, err error) {
 type Patcher struct {
 	*Job
 	basis io.ReaderAt
-	buf   []byte
+	buf   unsafe.Pointer
 }
 
 var patchCallback = C.patchCallback // So we can use the `&` operator in NewPatcher
@@ -347,7 +354,7 @@ func NewPatcher(delta io.Reader, basis io.ReaderAt) (job *Patcher, err error) {
 
 	id := uintptr(unsafe.Pointer(_job.rsbufs)) // this is a unique, unchanging number (C doesn't change pointers under the hood)
 	storePatcher(job, id)
-	job.job = C.rs_patch_begin((*C.rs_copy_cb)(patchCallback), unsafe.Pointer(id))
+	job.job = C.rs_patch_begin((*C.rs_copy_cb)(patchCallback), unsafe.Pointer(_job.rsbufs))
 	if job.job == nil {
 		dropPatcher(id)
 		job.Close()
@@ -361,5 +368,10 @@ func NewPatcher(delta io.Reader, basis io.ReaderAt) (job *Patcher, err error) {
 // able to free.
 func (patch *Patcher) Close() error {
 	dropPatcher(uintptr(unsafe.Pointer(patch.Job.rsbufs)))
+
+	if patch.buf != nil {
+		C.free(patch.buf)
+	}
+
 	return patch.Job.Close()
 }
